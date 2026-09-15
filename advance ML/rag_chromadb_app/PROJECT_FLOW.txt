@@ -1,0 +1,311 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║          PDF QUESTION ANSWERING SYSTEM — PROJECT FLOW DOCUMENTATION          ║
+║                     RAG + ChromaDB + Groq + Streamlit                        ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ OVERVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+This system lets users upload PDF files and ask natural language questions
+about their contents. It uses Retrieval-Augmented Generation (RAG) to find
+the most relevant sections of the PDFs and passes them to Groq's LLM to
+generate accurate, cited answers.
+
+Tech Stack:
+  • Frontend   →  Streamlit (Python web UI)
+  • Embeddings →  Sentence Transformers (all-MiniLM-L6-v2, runs locally)
+  • Vector DB  →  ChromaDB  (persistent, stored in ./chroma_db/)
+  • LLM        →  Groq API  (model: groq/compound, free tier)
+  • PDF Parser →  pdfplumber
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ PROJECT STRUCTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  rag_chromadb_app/
+  │
+  ├── app.py                  ← Main Streamlit UI (entry point)
+  ├── run.bat                 ← Windows launcher (double-click to start)
+  ├── requirements.txt        ← Python dependencies
+  ├── .env                    ← API key & configuration
+  │
+  ├── .streamlit/
+  │   └── config.toml         ← Streamlit server settings
+  │
+  ├── src/
+  │   ├── config.py           ← Loads settings from .env via Pydantic
+  │   ├── pdf_processor.py    ← PDF text extraction & chunking
+  │   ├── vector_store.py     ← ChromaDB operations & embeddings
+  │   ├── rag_engine.py       ← RAG pipeline (retrieve + generate)
+  │   ├── utils.py            ← File utilities (save, delete, format)
+  │   └── logger.py           ← Structured logging (structlog)
+  │
+  ├── chroma_db/              ← Persistent vector database (auto-created)
+  ├── uploaded_pdfs/          ← Uploaded PDF files (auto-created)
+  └── venv/                   ← Python virtual environment
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ COMPLETE SYSTEM FLOW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+╔══════════╗     ╔══════════════╗     ╔══════════════╗     ╔═════════════╗
+║  USER    ║────▶║ PDF UPLOAD   ║────▶║  INDEXING    ║────▶║  CHROMADB   ║
+║ uploads  ║     ║ (Streamlit)  ║     ║  PIPELINE    ║     ║ Vector Store║
+║  PDF     ║     ╚══════════════╝     ╚══════════════╝     ╚═════════════╝
+╚══════════╝                                                      │
+                                                                  │ (stored)
+╔══════════╗     ╔══════════════╗     ╔══════════════╗            │
+║  USER    ║────▶║  QUESTION    ║────▶║  RETRIEVAL   ║◀───────────┘
+║  asks    ║     ║  (Streamlit) ║     ║  (ChromaDB   ║
+║ question ║     ╚══════════════╝     ║   similarity ║
+╚══════════╝                          ║   search)    ║
+                                      ╚══════════════╝
+                                             │
+                                             ▼
+                                      ╔══════════════╗
+                                      ║  GENERATION  ║
+                                      ║  (Groq API   ║
+                                      ║  groq/       ║
+                                      ║  compound)   ║
+                                      ╚══════════════╝
+                                             │
+                                             ▼
+                                      ╔══════════════╗
+                                      ║   ANSWER +   ║
+                                      ║  CITATIONS   ║
+                                      ║ (Streamlit)  ║
+                                      ╚══════════════╝
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ PHASE 1 — PDF INDEXING PIPELINE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  STEP 1 │ Upload
+  ────────┼───────────────────────────────────────────────────────────────────
+          │ User drops a PDF file in the Streamlit sidebar.
+          │ File is saved to ./uploaded_pdfs/<filename>.pdf
+          │ File: src/utils.py → FileUtils.save_uploaded_file()
+
+  STEP 2 │ Text Extraction
+  ────────┼───────────────────────────────────────────────────────────────────
+          │ pdfplumber opens the PDF page by page.
+          │ Text is extracted from each page along with the page number.
+          │ Pages with no extractable text (e.g. image-only pages) are skipped.
+          │ File: src/pdf_processor.py → extract_text_from_pdf()
+          │ Output: List of {text, page, source, total_pages}
+
+  STEP 3 │ Chunking
+  ────────┼───────────────────────────────────────────────────────────────────
+          │ Each page's text is split into smaller overlapping chunks using
+          │ LangChain's RecursiveCharacterTextSplitter.
+          │
+          │   Chunk Size    : 500 characters  (configurable in .env)
+          │   Chunk Overlap : 100 characters  (ensures context continuity)
+          │   Separators    : \n\n → \n → ". " → " " → ""
+          │
+          │ Each chunk gets a deterministic SHA-256 ID to prevent duplicates.
+          │ File: src/pdf_processor.py → create_chunks()
+          │ Output: List of {id, text, metadata{source, page, filename, ...}}
+
+  STEP 4 │ Embedding
+  ────────┼───────────────────────────────────────────────────────────────────
+          │ Each chunk's text is converted into a 384-dimensional vector using
+          │ Sentence Transformers model: all-MiniLM-L6-v2
+          │
+          │   • Model runs entirely locally (no API cost)
+          │   • Vectors are normalized for cosine similarity
+          │   • Batched in groups of 64 for memory efficiency
+          │
+          │ File: src/vector_store.py → embed_texts()
+
+  STEP 5 │ Storing in ChromaDB
+  ────────┼───────────────────────────────────────────────────────────────────
+          │ Embeddings + text + metadata are stored in ChromaDB.
+          │
+          │   • Collection: "pdf_knowledge"  (cosine similarity space)
+          │   • Persisted to disk at: ./chroma_db/
+          │   • Duplicate chunks are skipped automatically
+          │
+          │ File: src/vector_store.py → add_chunks()
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ PHASE 2 — QUESTION ANSWERING PIPELINE (RAG)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  STEP 1 │ User Question
+  ────────┼───────────────────────────────────────────────────────────────────
+          │ User types a question in the Streamlit chat input.
+          │ File: app.py
+
+  STEP 2 │ Query Embedding
+  ────────┼───────────────────────────────────────────────────────────────────
+          │ The question is embedded using the same all-MiniLM-L6-v2 model,
+          │ producing a 384-dimensional vector.
+          │ File: src/vector_store.py → embed_texts()
+
+  STEP 3 │ Similarity Search (Retrieve)
+  ────────┼───────────────────────────────────────────────────────────────────
+          │ ChromaDB searches for the top-K most similar chunks using
+          │ cosine similarity between the query vector and stored vectors.
+          │
+          │   Top-K       : 5 results  (configurable via sidebar slider)
+          │   Threshold   : 0.3        (configurable via sidebar slider)
+          │   Returns     : chunk text + metadata + cosine distances
+          │
+          │ File: src/vector_store.py → search()
+
+  STEP 4 │ Context Filtering
+  ────────┼───────────────────────────────────────────────────────────────────
+          │ Chunks with similarity below the threshold are filtered out.
+          │ If all chunks are below threshold, the top 3 are kept as fallback.
+          │ A confidence score is computed: confidence = 1 - avg_distance
+          │ File: src/rag_engine.py → answer()
+
+  STEP 5 │ Prompt Building
+  ────────┼───────────────────────────────────────────────────────────────────
+          │ Retrieved chunks are formatted as numbered excerpts:
+          │
+          │   [Excerpt 1] From 'document.pdf' (Page 3):
+          │   <chunk text>
+          │
+          │   [Excerpt 2] From 'document.pdf' (Page 7):
+          │   <chunk text>
+          │
+          │ The user question is appended at the end.
+          │ File: src/rag_engine.py → _build_context()
+
+  STEP 6 │ LLM Generation (Groq API)
+  ────────┼───────────────────────────────────────────────────────────────────
+          │ The formatted prompt is sent to Groq API:
+          │
+          │   Model       : groq/compound
+          │   Temperature : 0.1   (factual, low creativity)
+          │   Max Tokens  : 2048
+          │   Retries     : 3 automatic retries on failure
+          │
+          │ System prompt instructs the model to:
+          │   • Answer ONLY from the provided excerpts
+          │   • Cite sources as [1], [2], etc.
+          │   • Say "I cannot find the answer" if not in excerpts
+          │   • Not hallucinate or add external knowledge
+          │
+          │ File: src/rag_engine.py → _call_groq()
+
+  STEP 7 │ Response Cleanup
+  ────────┼───────────────────────────────────────────────────────────────────
+          │ <think>...</think> reasoning blocks that some models emit
+          │ are automatically stripped from the response.
+          │ File: src/rag_engine.py → _strip_think_tags()
+
+  STEP 8 │ Display Answer + Sources
+  ────────┼───────────────────────────────────────────────────────────────────
+          │ The answer is shown in the chat interface.
+          │ Under each answer, a collapsible "Sources" section shows:
+          │
+          │   • Filename and page number
+          │   • A 250-character preview of the retrieved chunk text
+          │   • Similarity score (e.g. 87%)
+          │   • Overall confidence score
+          │   • Number of chunks used
+          │   • Model name
+          │
+          │ File: app.py → _render_answer()
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ KEY CONFIGURATION (.env)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Variable              Default           Description
+  ────────────────────  ────────────────  ─────────────────────────────────────
+  GROQ_API_KEY          (your key)        Groq API key (required)
+  GROQ_MODEL            groq/compound     LLM model to use
+  GROQ_TEMPERATURE      0.1               Response creativity (0=factual)
+  GROQ_MAX_TOKENS       2048              Max response length
+  EMBEDDING_MODEL       all-MiniLM-L6-v2  Local embedding model
+  EMBEDDING_DEVICE      cpu               cpu or cuda
+  CHUNK_SIZE            500               Characters per chunk
+  CHUNK_OVERLAP         100               Overlap between chunks
+  TOP_K_RESULTS         5                 Chunks retrieved per query
+  SIMILARITY_THRESHOLD  0.3               Min similarity to include chunk
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ HOW TO RUN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Option A — Double-click  (recommended)
+  ───────────────────────────────────────
+    Double-click run.bat
+    App opens at http://localhost:8501
+
+  Option B — PowerShell / Terminal
+  ──────────────────────────────────
+    .\venv\Scripts\streamlit.exe run app.py --server.fileWatcherType none
+
+  First-time install (if venv is missing)
+  ────────────────────────────────────────
+    python -m venv venv
+    .\venv\Scripts\pip install -r requirements.txt
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ DATA FLOW DIAGRAM (Simplified)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  PDF File
+     │
+     ▼
+  pdfplumber ──── extracts text per page
+     │
+     ▼
+  LangChain TextSplitter ──── splits into 500-char chunks (100 overlap)
+     │
+     ▼
+  Sentence Transformer ──── encodes chunks → 384-dim vectors
+     │
+     ▼
+  ChromaDB ──── stores vectors + text + metadata on disk
+     │
+     │   (at query time)
+     │
+  User Question ──── encoded → 384-dim query vector
+     │
+     ▼
+  ChromaDB.query() ──── cosine similarity search → top-5 chunks
+     │
+     ▼
+  Prompt Builder ──── formats chunks as [Excerpt 1], [Excerpt 2]...
+     │
+     ▼
+  Groq API (groq/compound) ──── generates grounded answer
+     │
+     ▼
+  Streamlit UI ──── displays answer + source citations
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ PRODUCTION FEATURES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ✔  Persistent storage  — ChromaDB survives app restarts
+  ✔  Duplicate prevention — SHA-256 chunk IDs prevent re-indexing same content
+  ✔  Auto retry          — Groq API calls retry 3x on transient failures
+  ✔  Per-file delete     — Remove individual files from the knowledge base
+  ✔  Confidence scoring  — Every answer shows a confidence percentage
+  ✔  Source citations    — Exact page + text excerpt shown for every answer
+  ✔  Hallucination guard — System prompt strictly limits answers to excerpts
+  ✔  Think-tag stripping — Removes internal reasoning blocks from responses
+  ✔  Memory safe         — OPENBLAS_NUM_THREADS=1 prevents OOM crashes
+  ✔  No file watcher     — fileWatcherType=none prevents transformers spam
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ END OF DOCUMENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

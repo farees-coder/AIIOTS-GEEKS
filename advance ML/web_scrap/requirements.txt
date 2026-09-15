@@ -1,0 +1,9 @@
+playwright
+beautifulsoup4
+groq
+streamlit
+python-dotenv
+pydantic
+pytest
+chromadb
+sentence-transformers

@@ -1,0 +1,11 @@
+[server]
+# Disable file watcher — prevents Streamlit from crawling transformers/torchvision
+fileWatcherType = "none"
+runOnSave = false
+
+[browser]
+gatherUsageStats = false
+
+[runner]
+# Don't reload on import errors from third-party libs
+fastReruns = true
